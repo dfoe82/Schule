@@ -33,6 +33,8 @@ p{margin:6px 0}
 .mt{margin-top:10px}
 .seg{display:flex;background:#eeeae2;border-radius:11px;padding:3px;gap:3px;flex-wrap:wrap}
 .seg button{flex:1;border:0;background:transparent;padding:9px 6px;border-radius:9px;font-size:14px;color:var(--ink);min-width:64px;font-family:inherit}
+.seg.four{display:grid;grid-template-columns:1fr 1fr}
+.seg button{min-width:0}
 .seg button.on{background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:600}
 label.lbl{display:block;font-size:14px;color:var(--muted);margin:14px 0 6px}
 label.chk{display:flex;gap:10px;align-items:center;margin-top:12px;font-size:15px}
@@ -102,7 +104,7 @@ table.prev td:first-child{font-weight:600;width:50%}
 <div class="toast" id="toast"></div>
 
 <script>
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.3';
 const KEY = 'vokabeltrainer-v1';
 // Tage bis zur nächsten Wiederholung je Fach (Fach 0 = neu)
 const INTERVALS = [0, 1, 2, 5, 10, 30];
@@ -200,18 +202,51 @@ function check(input, field, lang) {
 }
 
 // ---------- Sprachausgabe ----------
-const canSpeak = 'speechSynthesis' in window;
-let voices = [];
-function loadVoices() { if (canSpeak) voices = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang)); }
-if (canSpeak) { loadVoices(); speechSynthesis.onvoiceschanged = () => { loadVoices(); if (view === 'more') render(); }; }
+const canSpeak = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+let voices = [], speechUnlocked = false;
+const keepUtter = []; // Safari verwirft sonst manchmal Äußerungen, bevor sie gesprochen werden
+// Spaßstimmen von Apple, die nicht automatisch gewählt werden sollen
+const NOVELTY = /albert|bad news|bahh|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox/i;
+const PREFERRED = /daniel|serena|kate|arthur|martha|stephanie|oliver|google uk english/i;
+function loadVoices() {
+  if (!canSpeak) return;
+  voices = speechSynthesis.getVoices().filter(v => /^en/i.test(v.lang.replace('_', '-')));
+}
+if (canSpeak) {
+  loadVoices();
+  speechSynthesis.addEventListener ? speechSynthesis.addEventListener('voiceschanged', () => { loadVoices(); if (view === 'more') render(); })
+    : (speechSynthesis.onvoiceschanged = () => { loadVoices(); if (view === 'more') render(); });
+}
+function pickVoice() {
+  if (!voices.length) loadVoices();
+  const gb = v => /^en[-_]gb/i.test(v.lang), us = v => /^en[-_]us/i.test(v.lang), ok = v => !NOVELTY.test(v.name);
+  return voices.find(v => v.voiceURI === S.settings.voice)
+    || voices.find(v => gb(v) && PREFERRED.test(v.name))
+    || voices.find(v => gb(v) && ok(v))
+    || voices.find(v => us(v) && ok(v))
+    || voices.find(ok) || null;
+}
+// iOS spricht erst, nachdem einmal direkt bei einem Antippen gesprochen wurde
+function unlockSpeech() {
+  if (speechUnlocked || !canSpeak) return;
+  speechUnlocked = true;
+  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; keepUtter.push(u); speechSynthesis.speak(u); } catch (e) {}
+}
+document.addEventListener('touchend', unlockSpeech, { passive: true });
+document.addEventListener('click', unlockSpeech);
 function speak(text, rate = 0.9) {
   if (!canSpeak || !text) return;
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(String(text).replace(/\//g, ', ').replace(/[()]/g, ''));
-  const v = voices.find(v => v.voiceURI === S.settings.voice) || voices.find(v => v.lang === 'en-GB') || voices.find(v => /^en/i.test(v.lang));
-  if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'en-GB';
-  u.rate = rate;
-  speechSynthesis.speak(u);
+  const synth = speechSynthesis;
+  const u = new SpeechSynthesisUtterance(String(text).replace(/\//g, ', ').replace(/[()…]/g, ''));
+  const v = pickVoice();
+  if (v) { u.voice = v; u.lang = v.lang.replace('_', '-'); } else u.lang = 'en-GB';
+  u.rate = rate; u.volume = 1;
+  u.onerror = e => { if (e.error && !['interrupted', 'canceled'].includes(e.error)) toast('Vorlesen hat nicht geklappt (' + e.error + ')'); };
+  keepUtter.push(u); if (keepUtter.length > 6) keepUtter.shift();
+  speechUnlocked = true;
+  // Direkt nach cancel() verschluckt Safari die nächste Ausgabe, deshalb kurz warten
+  if (synth.speaking || synth.pending) { synth.cancel(); setTimeout(() => { synth.resume(); synth.speak(u); }, 120); }
+  else { synth.resume(); synth.speak(u); }
 }
 const speakId = (id, rate) => { const w = word(id); if (w) speak(w.en, rate); };
 
@@ -259,7 +294,7 @@ document.addEventListener('keydown', e => {
 });
 
 function seg(key, options) {
-  return `<div class="seg">${options.map(([v, l]) => `<button class="${String(S.settings[key]) === String(v) ? 'on' : ''}" onclick="setSetting('${key}','${v}')">${l}</button>`).join('')}</div>`;
+  return `<div class="seg${options.length >= 4 ? ' four' : ''}">${options.map(([v, l]) => `<button class="${String(S.settings[key]) === String(v) ? 'on' : ''}" onclick="setSetting('${key}','${v}')">${l}</button>`).join('')}</div>`;
 }
 function setSetting(k, v) { S.settings[k] = (k === 'size') ? Number(v) : v; save(); render(); }
 function dots(box) { let h = '<span class="dots">'; for (let i = 1; i <= 5; i++) h += `<i class="${i <= (box || 0) ? 'f' : ''}"></i>`; return h + '</span>'; }
@@ -677,7 +712,8 @@ function viewMore() {
       ? `<label class="lbl" style="margin-top:0">Stimme</label><select onchange="S.settings.voice=this.value;save()"><option value="">Automatisch (britisch, falls vorhanden)</option>${voices.map(v => `<option value="${esc(v.voiceURI)}" ${S.settings.voice === v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select>`
       : `<p class="muted">Noch keine englische Stimme geladen. Zum Testen einmal auf „Probe hören“ tippen.</p>`;
     h += `<label class="chk"><input type="checkbox" ${S.settings.autoSpeak ? 'checked' : ''} onchange="S.settings.autoSpeak=this.checked;save()">Nach jeder Antwort das englische Wort vorlesen</label>
-      <button class="btn sec mt" onclick="speak('Hello! This is your vocabulary trainer.')">Probe hören</button>`;
+      <button class="btn sec mt" onclick="speak('Hello! This is your vocabulary trainer.')">Probe hören</button>
+      <p class="muted mt">Kein Ton? Am iPhone darf der Stummschalter nicht aktiv sein, sonst bleibt die Sprachausgabe im Browser still. Lauter stellen hilft dann nicht. Englische Stimmen lassen sich unter Einstellungen, Bedienungshilfen, Gesprochene Inhalte, Stimmen, Englisch nachladen.</p>`;
   }
   h += `</div>
   <div class="card"><h2>Sicherung</h2>
